@@ -1,0 +1,3 @@
+[submodule "external/sample_layer"]
+	path = external/sample_layer
+	url = git@github.com:baldurk/sample_layer.git
