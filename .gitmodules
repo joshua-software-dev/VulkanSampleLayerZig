@@ -1,3 +1,0 @@
-[submodule "external/sample_layer_cpp"]
-	path = external/sample_layer_cpp
-	url = git@github.com:baldurk/sample_layer.git
