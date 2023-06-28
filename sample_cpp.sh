@@ -2,7 +2,7 @@
 
 SCRIPT=$(readlink -f "$0")
 SCRIPTPATH=$(dirname "$SCRIPT")
-cd "$SCRIPTPATH/external/sample_layer_cpp/"
+cd "$SCRIPTPATH/external/sample_layer/"
 
 git apply ../cpp.patch
 
@@ -15,4 +15,4 @@ env \
     vkcube
 
 rm -f libsample_layer.so
-cd "$SCRIPTPATH/external/sample_layer_cpp/" && git reset --hard
+cd "$SCRIPTPATH/external/sample_layer/" && git reset --hard
