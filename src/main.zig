@@ -2,18 +2,41 @@ const std = @import("std");
 const vk = @import("vulkan-zig");
 const vk_layer_stubs = @import("vk_layer_stubs.zig");
 
-const CommandStats = extern struct {
+
+///////////////////////////////////////////////////////////////////////////////
+// Layer globals definition
+
+// differentiate this layer from the c++ implementation
+const LAYER_NAME = "VK_LAYER_SAMPLE_SampleLayerZig";
+const LAYER_DESC =
+    "Sample Layer Zig - " ++
+    "https://github.com/joshua-software-dev/VulkanSampleLayerZig";
+
+// single global lock, for simplicity
+var global_lock: std.Thread.Mutex = .{};
+
+// layer book-keeping information, to store dispatch tables
+// A hash table isn't needed as this layer is only given one device and one
+// instance
+var device_dispatcher: ?vk_layer_stubs.LayerDispatchTable = null;
+var instance_dispatcher: ?vk_layer_stubs.LayerInstanceDispatchTable = null;
+
+// actual data we're recording in this layer
+const CommandStats = extern struct
+{
     draw_count: u32,
     instance_count: u32,
     vert_count: u32
 };
-const LAYER_NAME = "VK_LAYER_SAMPLE_SampleLayerZig";
+// there are actually multiple of these, so a hash table is an acceptable
+// choice, however we store the actual object reference as the key rather than
+// manipulating pointers for use as keys
+var command_buffer_stats =
+    std.AutoHashMap(vk.CommandBuffer, CommandStats).init(std.heap.c_allocator);
 
-var command_buffer_stats = std.AutoHashMap(vk.CommandBuffer, CommandStats).init(std.heap.c_allocator);
-var device_dispatcher: ?vk_layer_stubs.LayerDispatchTable = null;
-var global_lock: std.Thread.Mutex = .{};
-var instance_dispatcher: ?vk_layer_stubs.LayerInstanceDispatchTable = null;
 
+///////////////////////////////////////////////////////////////////////////////
+// Layer init and shutdown
 
 export fn SampleLayerZig_CreateInstance
 (
@@ -23,10 +46,10 @@ export fn SampleLayerZig_CreateInstance
 )
 callconv(vk.vulkan_call_conv) vk.Result
 {
-    var layer_create_info: ?*vk_layer_stubs.LayerInstanceCreateInfo = @ptrCast
-    (
-        @alignCast(@constCast(p_create_info.p_next))
-    );
+    // Ensure this is a nullable pointer (?*) to allow stepping through the
+    // chain of p_next
+    var layer_create_info: ?*vk_layer_stubs.LayerInstanceCreateInfo =
+        @ptrCast(@alignCast(@constCast(p_create_info.p_next)));
 
     // step through the chain of p_next until we get to the link info
     while
@@ -47,23 +70,36 @@ callconv(vk.vulkan_call_conv) vk.Result
         return vk.Result.error_initialization_failed;
     }
 
-    var final_layer_create_info: *vk_layer_stubs.LayerDeviceCreateInfo = @ptrCast(layer_create_info orelse unreachable);
-    var gpa: vk.PfnGetInstanceProcAddr = final_layer_create_info.u.p_layer_info.pfn_next_get_instance_proc_addr;
-    // move chain on for next layer
-    final_layer_create_info.u.p_layer_info = final_layer_create_info.u.p_layer_info.p_next;
+    // create non-null pointer variable to make further interactions with this
+    // type easier
+    var final_lci: *vk_layer_stubs.LayerDeviceCreateInfo =
+        @ptrCast(layer_create_info orelse unreachable);
 
-    const createFunc: vk.PfnCreateInstance = @ptrCast(gpa(vk.Instance.null_handle, "vkCreateInstance"));
+    var gpa = final_lci.u.p_layer_info.pfn_next_get_instance_proc_addr;
+    // move chain on for next layer
+    final_lci.u.p_layer_info = final_lci.u.p_layer_info.p_next;
+
+    const createFunc: vk.PfnCreateInstance =
+        @ptrCast(gpa(vk.Instance.null_handle, "vkCreateInstance"));
+    // the original cpp version never uses this value despite saving it, I've
+    // opted to discard it instead
     _ = createFunc(p_create_info, p_allocator, p_instance);
 
-    // fetch our own dispatch table for the functions we need, into the next layer
+    // fetch our own dispatch table for the functions we need, into the next
+    // layer
+    const instance = p_instance.*;
     var dispatch_table: vk_layer_stubs.LayerInstanceDispatchTable = undefined;
-    dispatch_table.GetInstanceProcAddr = @ptrCast(gpa(p_instance.*, "vkGetInstanceProcAddr"));
-    dispatch_table.DestroyInstance = @ptrCast(gpa(p_instance.*, "vkDestroyInstance"));
-    dispatch_table.EnumerateDeviceExtensionProperties = @ptrCast(gpa(p_instance.*, "vkEnumerateDeviceExtensionProperties"));
+    dispatch_table.GetInstanceProcAddr = @ptrCast(gpa(instance, "vkGetInstanceProcAddr"));
+    dispatch_table.DestroyInstance = @ptrCast(gpa(instance, "vkDestroyInstance"));
+    dispatch_table.EnumerateDeviceExtensionProperties =
+        @ptrCast(gpa(instance, "vkEnumerateDeviceExtensionProperties"));
 
-    global_lock.lock();
-    defer global_lock.unlock();
-    instance_dispatcher = dispatch_table;
+    // store layer global instance dispatch table
+    {
+        global_lock.lock();
+        defer global_lock.unlock();
+        instance_dispatcher = dispatch_table;
+    }
 
     return vk.Result.success;
 }
@@ -77,9 +113,11 @@ callconv(vk.vulkan_call_conv) void
 {
     _ = instance;
     _ = p_allocator;
-    global_lock.lock();
-    defer global_lock.unlock();
-    instance_dispatcher = null;
+    {
+        global_lock.lock();
+        defer global_lock.unlock();
+        instance_dispatcher = null;
+    }
 }
 
 export fn SampleLayerZig_CreateDevice
@@ -91,10 +129,10 @@ export fn SampleLayerZig_CreateDevice
 )
 callconv(vk.vulkan_call_conv) vk.Result
 {
-    var layer_create_info: ?*vk_layer_stubs.LayerDeviceCreateInfo = @ptrCast
-    (
-        @alignCast(@constCast(p_create_info.p_next))
-    );
+    // Ensure this is a nullable pointer (?*) to allow stepping through the
+    // chain of p_next
+    var layer_create_info: ?*vk_layer_stubs.LayerDeviceCreateInfo =
+        @ptrCast(@alignCast(@constCast(p_create_info.p_next)));
 
     // step through the chain of p_next until we get to the link info
     while
@@ -115,27 +153,39 @@ callconv(vk.vulkan_call_conv) vk.Result
         return vk.Result.error_initialization_failed;
     }
 
-    var final_layer_create_info: *vk_layer_stubs.LayerDeviceCreateInfo = @ptrCast(layer_create_info orelse unreachable);
-    var gipa: vk.PfnGetInstanceProcAddr = final_layer_create_info.u.p_layer_info.pfn_next_get_instance_proc_addr;
-    var gdpa: vk.PfnGetDeviceProcAddr = final_layer_create_info.u.p_layer_info.pfn_next_get_device_proc_addr;
-    // move chain on for next layer
-    final_layer_create_info.u.p_layer_info = final_layer_create_info.u.p_layer_info.p_next;
+    // create non-null pointer variable to make further interactions with this
+    // type easier
+    var final_lci: *vk_layer_stubs.LayerDeviceCreateInfo =
+        @ptrCast(layer_create_info orelse unreachable);
 
-    const createFunc: vk.PfnCreateDevice = @ptrCast(gipa(vk.Instance.null_handle, "vkCreateDevice"));
+    var gipa = final_lci.u.p_layer_info.pfn_next_get_instance_proc_addr;
+    var gdpa = final_lci.u.p_layer_info.pfn_next_get_device_proc_addr;
+    // move chain on for next layer
+    final_lci.u.p_layer_info = final_lci.u.p_layer_info.p_next;
+
+    const createFunc: vk.PfnCreateDevice =
+        @ptrCast(gipa(vk.Instance.null_handle, "vkCreateDevice"));
+    // the original cpp version never uses this value despite saving it, I've
+    // opted to discard it instead
     _ = createFunc(physical_device, p_create_info, p_allocator, p_device);
 
-    // fetch our own dispatch table for the functions we need, into the next layer
+    // fetch our own dispatch table for the functions we need, into the next
+    // layer
+    const device = p_device.*;
     var dispatch_table: vk_layer_stubs.LayerDispatchTable = undefined;
-    dispatch_table.GetDeviceProcAddr = @ptrCast(gdpa(p_device.*, "vkGetDeviceProcAddr"));
-    dispatch_table.DestroyDevice = @ptrCast(gdpa(p_device.*, "vkDestroyDevice"));
-    dispatch_table.BeginCommandBuffer = @ptrCast(gdpa(p_device.*, "vkBeginCommandBuffer"));
-    dispatch_table.CmdDraw = @ptrCast(gdpa(p_device.*, "vkCmdDraw"));
-    dispatch_table.CmdDrawIndexed = @ptrCast(gdpa(p_device.*, "vkCmdDrawIndexed"));
-    dispatch_table.EndCommandBuffer = @ptrCast(gdpa(p_device.*, "vkEndCommandBuffer"));
+    dispatch_table.GetDeviceProcAddr = @ptrCast(gdpa(device, "vkGetDeviceProcAddr"));
+    dispatch_table.DestroyDevice = @ptrCast(gdpa(device, "vkDestroyDevice"));
+    dispatch_table.BeginCommandBuffer = @ptrCast(gdpa(device, "vkBeginCommandBuffer"));
+    dispatch_table.CmdDraw = @ptrCast(gdpa(device, "vkCmdDraw"));
+    dispatch_table.CmdDrawIndexed = @ptrCast(gdpa(device, "vkCmdDrawIndexed"));
+    dispatch_table.EndCommandBuffer = @ptrCast(gdpa(device, "vkEndCommandBuffer"));
 
-    global_lock.lock();
-    defer global_lock.unlock();
-    device_dispatcher = dispatch_table;
+    // store layer global device dispatch table
+    {
+        global_lock.lock();
+        defer global_lock.unlock();
+        device_dispatcher = dispatch_table;
+    }
 
     return vk.Result.success;
 }
@@ -149,10 +199,15 @@ callconv(vk.vulkan_call_conv) void
 {
     _ = device;
     _ = p_allocator;
-    global_lock.lock();
-    defer global_lock.unlock();
-    device_dispatcher = null;
+    {
+        global_lock.lock();
+        defer global_lock.unlock();
+        device_dispatcher = null;
+    }
 }
+
+///////////////////////////////////////////////////////////////////////////////
+// Actual layer implementation
 
 export fn SampleLayerZig_BeginCommandBuffer
 (
@@ -161,13 +216,22 @@ export fn SampleLayerZig_BeginCommandBuffer
 )
 callconv(vk.vulkan_call_conv) vk.Result
 {
-    var stats: CommandStats = .{ .draw_count = 0, .instance_count = 0, .vert_count = 0 };
-
-    command_buffer_stats.put(command_buffer, stats) catch @panic("BeginCommandBuffer failed to save stats table");
-
     global_lock.lock();
     defer global_lock.unlock();
-    const table = device_dispatcher orelse @panic("BeginCommandBuffer failed to get dispatch table");
+
+    var stats = CommandStats
+    {
+        .draw_count = 0,
+        .instance_count = 0,
+        .vert_count = 0
+    };
+    command_buffer_stats
+        .put(command_buffer, stats)
+        catch @panic("BeginCommandBuffer stats table OOM");
+
+    const table =
+        device_dispatcher
+        orelse @panic("BeginCommandBuffer failed to get dispatch table");
     return table.BeginCommandBuffer(command_buffer, p_begin_info);
 }
 
@@ -184,14 +248,28 @@ callconv(vk.vulkan_call_conv) void
     global_lock.lock();
     defer global_lock.unlock();
 
-    var stats = command_buffer_stats.get(command_buffer) orelse @panic("CmdDraw failed to get command buffer stats");
+    var stats =
+        command_buffer_stats.get(command_buffer)
+        orelse @panic("CmdDraw failed to get command buffer stats");
     stats.draw_count += 1;
     stats.instance_count += instance_count;
     stats.vert_count += instance_count * vertex_count;
-    command_buffer_stats.put(command_buffer, stats) catch @panic("SampleLayerZig_CmdDraw failed to save stats table");
 
-    const table = device_dispatcher orelse @panic("CmdDraw failed to get dispatch table");
-    table.CmdDraw(command_buffer, vertex_count, instance_count, first_vertex, first_instance);
+    command_buffer_stats
+        .put(command_buffer, stats)
+        catch @panic("SampleLayerZig_CmdDraw stats table OOM");
+
+    const table =
+        device_dispatcher
+        orelse @panic("CmdDraw failed to get dispatch table");
+    table.CmdDraw
+    (
+        command_buffer,
+        vertex_count,
+        instance_count,
+        first_vertex,
+        first_instance
+    );
 }
 
 export fn SampleLayerZig_CmdDrawIndexed
@@ -208,14 +286,29 @@ callconv(vk.vulkan_call_conv) void
     global_lock.lock();
     defer global_lock.unlock();
 
-    var stats = command_buffer_stats.get(command_buffer) orelse @panic("CmdDrawIndexed failed to get command buffer stats");
+    var stats =
+        command_buffer_stats.get(command_buffer)
+        orelse @panic("CmdDrawIndexed failed to get command buffer stats");
     stats.draw_count += 1;
     stats.instance_count += instance_count;
     stats.vert_count += instance_count * index_count;
-    command_buffer_stats.put(command_buffer, stats) catch @panic("SampleLayerZig_CmdDrawIndexed failed to save stats table");
 
-    const table = device_dispatcher orelse @panic("CmdDrawIndexed failed to get dispatch table");
-    table.CmdDrawIndexed(command_buffer, index_count, instance_count, first_index, vertex_offset, first_instance);
+    command_buffer_stats
+        .put(command_buffer, stats)
+        catch @panic("SampleLayerZig_CmdDrawIndexed stats table OOM");
+
+    const table =
+        device_dispatcher
+        orelse @panic("CmdDrawIndexed failed to get dispatch table");
+    table.CmdDrawIndexed
+    (
+        command_buffer,
+        index_count,
+        instance_count,
+        first_index,
+        vertex_offset,
+        first_instance
+    );
 }
 
 export fn SampleLayerZig_EndCommandBuffer
@@ -226,12 +319,16 @@ callconv(vk.vulkan_call_conv) vk.Result
 {
     global_lock.lock();
     defer global_lock.unlock();
-    var stats: ?CommandStats = command_buffer_stats.get(command_buffer) orelse @panic("CmdDraw failed to get command buffer stats");
+
+    var stats: ?CommandStats = command_buffer_stats.get(command_buffer);
     if (stats != null)
     {
         std.debug.print
         (
-            "Command buffer {} ended with {} draws, {} instances and {} vertices\n",
+            "Command buffer {} ended with " ++
+            "{} draws, " ++
+            "{} instances, and " ++
+            "{} vertices\n",
             .{
                 &command_buffer,
                 stats.?.draw_count,
@@ -239,15 +336,28 @@ callconv(vk.vulkan_call_conv) vk.Result
                 stats.?.vert_count
             }
         );
+
+        // Ensure this table actually removes the command buffer and doesn't
+        // endlessly accumulate entries
+        _ = command_buffer_stats.remove(command_buffer);
     }
     else
     {
-        std.debug.print("WARNING: EndCommandBuffer failed to get command buffer stats\n", .{});
+        std.debug.print
+        (
+            "WARNING: EndCommandBuffer failed to get command buffer stats\n",
+            .{}
+        );
     }
 
-    const table = device_dispatcher orelse @panic("EndCommandBuffer failed to get dispatch table");
+    const table =
+        device_dispatcher
+        orelse @panic("EndCommandBuffer failed to get dispatch table");
     return table.EndCommandBuffer(command_buffer);
 }
+
+///////////////////////////////////////////////////////////////////////////////
+// Enumeration functions
 
 export fn SampleLayerZig_EnumerateInstanceLayerProperties
 (
@@ -256,11 +366,19 @@ export fn SampleLayerZig_EnumerateInstanceLayerProperties
 )
 callconv(vk.vulkan_call_conv) vk.Result
 {
+    // The c++ implementation checks that this pointer is not null, an
+    // unnecessary step as by vulkan convention it must be a valid pointer, so
+    // the check is removed here
     p_property_count.* = 1;
 
     if (p_properties != null)
     {
+        // save a non-null version of this pointer for convenience
         var props: [*]vk.LayerProperties = @ptrCast(p_properties);
+
+        // this variable will likely not be needed in future zig releases, but
+        // @ptrCast automatically calculating the expected type seems to fail
+        // as an arg to @memcpy. Until this is fixed, a temp variable is needed
         const temp_layer_name: *[vk.MAX_DESCRIPTION_SIZE]u8 = @ptrCast(@constCast(LAYER_NAME));
         @memcpy
         (
@@ -268,10 +386,8 @@ callconv(vk.vulkan_call_conv) vk.Result
             temp_layer_name
         );
 
-        const temp_layer_desc: *[vk.MAX_DESCRIPTION_SIZE]u8 = @ptrCast
-        (
-            @constCast("Sample layer - https://renderdoc.org/vulkan-layer-guide.html")
-        );
+        // the same blurb from above applies for this temp variable as well
+        const temp_layer_desc: *[vk.MAX_DESCRIPTION_SIZE]u8 = @ptrCast(@constCast(LAYER_DESC));
         @memcpy
         (
             &props[0].description,
@@ -306,12 +422,19 @@ export fn SampleLayerZig_EnumerateInstanceExtensionProperties
 callconv(vk.vulkan_call_conv) vk.Result
 {
     _ = p_properties;
-    const span_name = std.mem.span(p_layer_name) orelse "";
-    if (p_layer_name == null or !std.mem.eql(u8, span_name, LAYER_NAME))
+    if
+    (
+        p_layer_name == null or
+        !std.mem.eql(u8, std.mem.span(p_layer_name orelse unreachable), LAYER_NAME)
+    )
     {
         return vk.Result.error_layer_not_present;
     }
 
+    // The c++ implementation checks that this pointer is not null, which once
+    // again, cannot happen according to the API, and so the check is also
+    // removed here
+    //
     // don't expose any extensions
     p_property_count.* = 0;
     return vk.Result.success;
@@ -326,16 +449,34 @@ export fn SampleLayerZig_EnumerateDeviceExtensionProperties
 )
 callconv(vk.vulkan_call_conv) vk.Result
 {
-    const span_name = std.mem.span(p_layer_name) orelse "";
     // pass through any queries that aren't to us
-    if (p_layer_name == null or !std.mem.eql(u8, span_name, LAYER_NAME))
+    if
+    (
+        p_layer_name == null or
+        !std.mem.eql(u8, std.mem.span(p_layer_name orelse unreachable), LAYER_NAME)
+    )
     {
-        if (physical_device == vk.PhysicalDevice.null_handle) return vk.Result.success;
+        if (physical_device == vk.PhysicalDevice.null_handle)
+        {
+            return vk.Result.success;
+        }
 
         global_lock.lock();
         defer global_lock.unlock();
-        const table = instance_dispatcher orelse @panic("EnumerateDeviceExtensionProperties failed to get dispatch table");
-        return table.EnumerateDeviceExtensionProperties(physical_device, p_layer_name, p_property_count, p_properties);
+        const table =
+            instance_dispatcher
+            orelse @panic
+            (
+                "EnumerateDeviceExtensionProperties " ++
+                "failed to get dispatch table"
+            );
+        return table.EnumerateDeviceExtensionProperties
+        (
+            physical_device,
+            p_layer_name,
+            p_property_count,
+            p_properties
+        );
     }
 
     // don't expose any extensions
@@ -392,7 +533,9 @@ callconv(vk.vulkan_call_conv) vk.PfnVoidFunction
 
     global_lock.lock();
     defer global_lock.unlock();
-    const table = device_dispatcher orelse @panic("GetDeviceProcAddr failed to get dispatch table");
+    const table =
+        device_dispatcher
+        orelse @panic("GetDeviceProcAddr failed to get dispatch table");
     return @ptrCast(@alignCast(table.GetDeviceProcAddr(device, p_name)));
 }
 
@@ -467,6 +610,8 @@ callconv(vk.vulkan_call_conv) vk.PfnVoidFunction
 
     global_lock.lock();
     defer global_lock.unlock();
-    const table = instance_dispatcher orelse @panic("GetInstanceProcAddr failed to get dispatch table");
+    const table =
+        instance_dispatcher
+        orelse @panic("GetInstanceProcAddr failed to get dispatch table");
     return @ptrCast(@alignCast(table.GetInstanceProcAddr(instance, p_name)));
 }
