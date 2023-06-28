@@ -1,0 +1,29 @@
+diff --git a/Makefile b/Makefile
+index 9c69671..fa216f4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,2 +1,2 @@
+ libsample_layer.so: sample_layer.cpp
+-	c++ -shared -fPIC -std=c++11 sample_layer.cpp -o libsample_layer.so
++	c++ -shared -fPIC -std=c++11 -fno-sanitize=undefined sample_layer.cpp -o libsample_layer.so
+diff --git a/sample_layer.cpp b/sample_layer.cpp
+index 6b97968..25b7fe6 100644
+--- a/sample_layer.cpp
++++ b/sample_layer.cpp
+@@ -6,6 +6,7 @@
+
+ #include <mutex>
+ #include <map>
++#include <cstdio>
+
+ #undef VK_LAYER_EXPORT
+ #if defined(WIN32)
+@@ -191,7 +192,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL SampleLayer_EndCommandBuffer(VkCommandBuffer
+   scoped_lock l(global_lock);
+
+   CommandStats &s = commandbuffer_stats[commandBuffer];
+-  printf("Command buffer %p ended with %u draws, %u instances and %u vertices", commandBuffer, s.drawCount, s.instanceCount, s.vertCount);
++  printf("Command buffer %p ended with %u draws, %u instances and %u vertices\n", commandBuffer, s.drawCount, s.instanceCount, s.vertCount);
+
+   return device_dispatch[GetKey(commandBuffer)].EndCommandBuffer(commandBuffer);
+ }
