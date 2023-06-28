@@ -23,7 +23,7 @@ index 6b97968..25b7fe6 100644
 
    CommandStats &s = commandbuffer_stats[commandBuffer];
 -  printf("Command buffer %p ended with %u draws, %u instances and %u vertices", commandBuffer, s.drawCount, s.instanceCount, s.vertCount);
-+  printf("Command buffer %p ended with %u draws, %u instances and %u vertices\n", commandBuffer, s.drawCount, s.instanceCount, s.vertCount);
++  printf("Command buffer %p ended with %u draws, %u instances, and %u vertices\n", commandBuffer, s.drawCount, s.instanceCount, s.vertCount);
 
    return device_dispatch[GetKey(commandBuffer)].EndCommandBuffer(commandBuffer);
  }

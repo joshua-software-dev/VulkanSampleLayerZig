@@ -325,12 +325,12 @@ callconv(vk.vulkan_call_conv) vk.Result
     {
         std.debug.print
         (
-            "Command buffer {} ended with " ++
+            "Command buffer 0x{x} ended with " ++
             "{} draws, " ++
             "{} instances, and " ++
             "{} vertices\n",
             .{
-                &command_buffer,
+                @intFromPtr(&command_buffer),
                 stats.?.draw_count,
                 stats.?.instance_count,
                 stats.?.vert_count
